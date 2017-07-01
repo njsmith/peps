@@ -1,5 +1,5 @@
 PEP: 517
-Title: A build-system independent format for source trees
+Title: Supporting non-setup.py-based build backends in pyproject.toml
 Version: $Revision$
 Last-Modified: $Date$
 Author: Nathaniel J. Smith <njs@pobox.com>,
@@ -10,7 +10,7 @@ Status: Draft
 Type: Standards Track
 Content-Type: text/x-rst
 Created: 30-Sep-2015
-Post-History: 1 Oct 2015, 25 Oct 2015
+Post-History: 1 Oct 2015, 25 Oct 2015, 1 July 2017
 
 
 ==========
@@ -68,7 +68,7 @@ interface for installing from this format, to support usages like
 ``pip install some-directory/``.
 
 A *source distribution* is a static snapshot representing a particular
-release of some source code, like ``lxml-3.4.4.zip``. Source
+release of some source code, like ``lxml-3.4.4.tar.gz``. Source
 distributions serve many purposes: they form an archival record of
 releases, they provide a stupid-simple de facto standard for tools
 that want to ingest and process large corpora of code, possibly
@@ -158,165 +158,127 @@ Where the ``build-backend`` key exists, it takes precedence over
 Projects may still wish to include a ``setup.py`` for compatibility
 with tools that do not use this spec.
 
+
 =========================
  Build backend interface
 =========================
 
-The build backend object is expected to have attributes which provide
-some or all of the following hooks. The common ``config_settings``
-argument is described after the individual hooks::
+The build backend object is expected to have callable attributes
+called "hooks", which the build frontend can use to perform various
+actions. The two high-level actions defined by this spec are creation
+of an sdist (analogous to the legacy ``setup.py sdist`` command) and
+building of a wheel (analogous to the legacy ``setup.py bdist_wheel``
+command). We additionally define a namespace for tool-specific
+hooks, which may be useful for prototyping future extensions to this
+specification.
 
-  def get_build_wheel_requires(config_settings):
-      ...
 
-This hook MUST return an additional list of strings containing PEP 508
-dependency specifications, above and beyond those specified in the
-``pyproject.toml`` file, to be installed when building a wheel. Example::
+General rules for all hooks
+---------------------------
 
-  def get_build_wheel_requires(config_settings):
-      return ["wheel >= 0.25", "setuptools"]
 
-Optional. If not defined, the default implementation is equivalent to
-``return []``.
+Finding the source tree
+~~~~~~~~~~~~~~~~~~~~~~~
 
-::
+All hooks are run with the process working directory set to the root
+of the source tree (i.e., the directory containing
+``pyproject.toml``). To find the source tree, hooks should call
+``os.getpwd()`` or equivalent.
 
-  def prepare_wheel_metadata(metadata_directory, config_settings):
-      ...
+Rationale: the process working directory has to be set to something,
+and if we were to leave it up to the build frontend to pick, then
+packages developers would accidentally write code that assumes a
+particular answer here (example: ``long_desc =
+open("README.rst").read()``), and this code would break when used with
+other build frontends. So it's important that we standardize a value
+for all build frontends to use consistently. And this is the obvious
+thing to specify it as, especially because it's compatible with
+popular and long-standing conventions like calling
+``open("README.rst").read()``. Then, given that we've decided to
+standardize on working directory = source directory, it makes sense to
+say that this is the *only* way that this information is passed,
+because providing a second redundant way (example: as an explicit
+argument to hooks) would only increase the possiblity of error without
+any benefit.
 
-Must create a ``.dist-info`` directory containing wheel metadata
-inside the specified ``metadata_directory`` (i.e., creates a directory
-like ``{metadata_directory}/{package}-{version}.dist-info/``. This
-directory MUST be a valid ``.dist-info`` directory as defined in the
-wheel specification, except that it need not contain ``RECORD`` or
-signatures. The hook MAY also create other files inside this
-directory, and a build frontend MUST ignore such files; the intention
-here is that in cases where the metadata depends on build-time
-decisions, the build backend may need to record these decisions in
-some convenient format for re-use by the actual wheel-building step.
 
-This must return the basename (not the full path) of the ``.dist-info``
-directory it creates, as a unicode string.
+Lifecycle
+~~~~~~~~~
 
-Optional. If a build frontend needs this information and the method is
-not defined, it should call ``build_wheel`` and look at the resulting
-metadata directly.
+XX TODO: do we want to require frontends to use a new process for
+every hook call, or do we want to require backends to support multiple
+calls from the same process? Apparently scons and setuptools both can
+get cranky if you try to invoke them twice from the same process, so
+*someone* will be spawning extra processes here; the question is where
+to put that responsibility. The basic trade-off is that making it the
+backend's responsibility has better best-case performance if both the
+frontend and backend are able to re-use a single host process; but, if
+common frontends end up using new processes for each hook call for
+other reasons, then in practice either backends will end up spawning
+unnecessary extra processes, or else will end up with poorly tested
+paths when multiple hooks are run in the same process.
 
-::
+Given that ``get_build_*_requires`` → ``build_*`` in general requires
+changing the Python environment, it doesn't necessarily make sense to
+run these in the same process anyway. However, there's an important
+special case where it does: when ``get_build_*_requires`` returns
+``[]``. And this is probably the overwhelmingly most common case.
 
-  def prepare_wheel_build_files(build_directory, config_settings):
-      ...
+Does it even matter? Windows is notoriously slow at spawning
+subprocesses. As a quick test, I tried measuring the time to spawn
+CPython 3.6 + import a package on a Windows 10 VM running on my
+laptop. ``python3.6 -c "import flit"`` was about 300 ms per call;
+``python3.6 -c "import setuptools"`` was about 600 ms per call.
 
-Must copy or create any files needed to build a wheel of this package into
-``build_directory``. For instance, ``pyproject.toml`` should
-be copied unmodified into the root of this directory. For tools such
-as `setuptools_scm <https://github.com/pypa/setuptools_scm>`_, this may include
-extracting some information from a version control system.
-The ``build_wheel`` hook will subsequently be run from the ``build_directory``
-populated by this hook. The contents of the resulting wheel should be the same
-whether ``build_wheel`` is invoked in an original source directory, the build
-directory populated by this hook, or an unpacked sdist directory.
+We could also potentially get fancy and have a flag to let the
+frontend and backend negotiate this (e.g. ``process_reuse_safe`` as an
+opt-in flag). This could also be added later as an extension, as long
+as we initially default to requiring separate processes for each hook.
 
-Because the wheel will be built from a temporary build directory, ``build_wheel``
-may create intermediate files in the working directory, and does not need to
-take care to clean them up.
 
-The return value will be ignored.
+Calling conventions
+~~~~~~~~~~~~~~~~~~~
 
-Optional. If this hook is not defined, frontends may call ``build_sdist``
-and unpack the archive to use as a build directory. Backends in which
-building an sdist has additional requirements should define
-``prepare_wheel_build_files``.
+Hooks MAY be called with positional or keyword arguments, so backends
+implementing them MUST be careful to make sure that their signatures –
+including argument names – exactly match those specified here.
 
-::
 
-  def build_wheel(wheel_directory, config_settings, metadata_directory=None):
-      ...
+Output
+~~~~~~
 
-Must build a .whl file, and place it in the specified ``wheel_directory``.
+Hooks MAY print arbitrary informational text on stdout and
+stderr. They MUST NOT read from stdin, and the build frontend MAY
+close stdin before invoking the hooks.
 
-If the build frontend has previously called ``prepare_wheel_metadata`` and
-depends on the wheel resulting from this call to have metadata
-matching this earlier call, then it should provide the path to the created
-``.dist-info`` directory as the ``metadata_directory`` argument. If this
-argument is provided, then ``build_wheel`` MUST produce a wheel with identical
-metadata. The directory passed in by the build frontend MUST be
-identical to the directory created by ``prepare_wheel_metadata``,
-including any unrecognized files it created.
+The build frontend may capture stdout and/or stderr from the backend. If the
+backend detects that an output stream is not a terminal/console (e.g.
+``not sys.stdout.isatty()``), it SHOULD ensure that any output it writes to that
+stream is UTF-8 encoded. The build frontend MUST NOT fail if captured output is
+not valid UTF-8, but it MAY not preserve all the information in that case (e.g.
+it may decode using the *replace* error handler in Python). If the output stream
+is a terminal, the build backend is responsible for presenting its output
+accurately, as for any program running in a terminal.
 
-This must return the basename (not the full path) of the ``.whl`` file it
-creates, as a unicode string.
+If a hook raises any exception, or causes the process to terminate,
+then this indicates that the operation has failed.
 
-Mandatory.
 
-::
+User-specified configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-  def get_build_sdist_requires(config_settings):
-    ...
+All hooks take a standard ``config_settings`` argument.
 
-This hook MUST return an additional list of strings containing PEP 508
-dependency specifications, above and beyond those specified in the
-``pyproject.toml`` file. These dependencies will be installed for building an
-sdist.
-
-Optional. If not defined, the default implementation is equivalent to
-``return []``.
-
-::
-
-  def build_sdist(sdist_directory, config_settings):
-      ...
-
-Must build a .tar.gz source distribution and place it in the specified
-``sdist_directory``.
-
-A .tar.gz source distribution (sdist) contains a single top-level directory called
-``{name}-{version}`` (e.g. ``foo-1.0``), containing the source files of the
-package. This directory must also contain the
-``pyproject.toml`` from the build directory, and a PKG-INFO file containing
-metadata in the format described in
-`PEP 345 <https://www.python.org/dev/peps/pep-0345/>`_. Although historically
-zip files have also been used as sdists, this hook should produce a gzipped
-tarball. This is already the more common format for sdists, and having a
-consistent format makes for simpler tooling.
-
-The generated tarball should use the modern POSIX.1-2001 pax tar format, which
-specifies UTF-8 based file names. This is not yet the default for the tarfile
-module shipped with Python 3.6, so backends using the tarfile module need to
-explicitly pass ``format=tarfile.PAX_FORMAT``.
-
-This must return the basename (not the full path) of the ``.tar.gz`` file it
-creates, as a unicode string.
-
-Mandatory, but it may not succeed in all situations: for instance, some tools
-can only build an sdist from a VCS checkout.
-
-.. note:: Editable installs
-
-   This PEP originally specified another hook, ``install_editable``, to do an
-   editable install (as with ``pip install -e``). It was removed due to the
-   complexity of the topic, but may be specified in a later PEP.
-
-   Briefly, the questions to be answered include: what reasonable ways existing
-   of implementing an 'editable install'? Should the backend or the frontend
-   pick how to make an editable install? And if the frontend does, what does it
-   need from the backend to do so.
-
-::
-
-  config_settings
-
-This argument, which is passed to all hooks, is an arbitrary
-dictionary provided as an "escape hatch" for users to pass ad-hoc
-configuration into individual package builds. Build backends MAY
-assign any semantics they like to this dictionary. Build frontends
-SHOULD provide some mechanism for users to specify arbitrary
-string-key/string-value pairs to be placed in this dictionary. For
-example, they might support some syntax like ``--package-config
-CC=gcc``. Build frontends MAY also provide arbitrary other mechanisms
-for users to place entries in this dictionary. For example, ``pip``
-might choose to map a mix of modern and legacy command line arguments
-like::
+This argument is an arbitrary dictionary provided as an "escape hatch"
+for users to pass ad-hoc configuration into individual package
+builds. Build backends MAY assign any semantics they like to this
+dictionary. Build frontends SHOULD provide some mechanism for users to
+specify arbitrary string-key/string-value pairs to be placed in this
+dictionary. For example, they might support some syntax like
+``--package-config CC=gcc``. Build frontends MAY also provide
+arbitrary other mechanisms for users to place entries in this
+dictionary. For example, ``pip`` might choose to map a mix of modern
+and legacy command line arguments like::
 
   pip install                                           \
     --package-config CC=gcc                             \
@@ -336,30 +298,9 @@ Of course, it's up to users to make sure that they pass options which
 make sense for the particular build backend and package that they are
 building.
 
-The hooks may be called with positional or keyword arguments, so backends
-implementing them should be careful to make sure that their signatures match
-both the order and the names of the arguments above.
 
-All hooks are run with working directory set to the root of the source
-tree, and MAY print arbitrary informational text on stdout and
-stderr. They MUST NOT read from stdin, and the build frontend MAY
-close stdin before invoking the hooks.
-
-The build frontend may capture stdout and/or stderr from the backend. If the
-backend detects that an output stream is not a terminal/console (e.g.
-``not sys.stdout.isatty()``), it SHOULD ensure that any output it writes to that
-stream is UTF-8 encoded. The build frontend MUST NOT fail if captured output is
-not valid UTF-8, but it MAY not preserve all the information in that case (e.g.
-it may decode using the *replace* error handler in Python). If the output stream
-is a terminal, the build backend is responsible for presenting its output
-accurately, as for any program running in a terminal.
-
-If a hook raises an exception, or causes the process to terminate,
-then this indicates an error.
-
-
-Build environment
-=================
+Hook execution environment
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 One of the responsibilities of a build frontend is to set up the
 Python environment in which the build backend will run.
@@ -370,20 +311,10 @@ mechanism at all. But whatever mechanism is used MUST meet the
 following criteria:
 
 - All requirements specified by the project's build-requirements must
-  be available for import from Python. In particular:
-
-  - The ``get_build_wheel_requires`` and ``get_build_sdist_requires`` hooks are
-    executed in an environment which contains the bootstrap requirements
-    specified in the ``pyproject.toml`` file.
-
-  - The ``prepare_wheel_metadata``, ``prepare_wheel_build_files`` and
-    ``build_wheel`` hooks are executed in an environment which contains the
-    bootstrap requirements from ``pyproject.toml`` and those specified by the
-    ``get_build_wheel_requires`` hook.
-
-  - The ``build_sdist`` hook is executed in an environment which contains the
-    bootstrap requirements from ``pyproject.toml`` and those specified by the
-    ``get_build_sdist_requires`` hook.
+  be available for import from Python. In particular, the
+  distributions specified in the ``pyproject.toml`` key
+  ``build-system.requires`` must be made available to all hooks. Some
+  hooks have additional requirements documented below.
 
 - This must remain true even for new Python subprocesses spawned by
   the build environment, e.g. code like::
@@ -392,8 +323,9 @@ following criteria:
     subprocess.check_call([sys.executable, ...])
 
   must spawn a Python process which has access to all the project's
-  build-requirements. This is necessary e.g. for build backends that
-  want to run legacy ``setup.py`` scripts in a subprocess.
+  build-requirements. For example, this is necessary to support build
+  backends that want to run legacy ``setup.py`` scripts in a
+  subprocess.
 
 - All command-line scripts provided by the build-required packages
   must be present in the build environment's PATH. For example, if a
@@ -410,8 +342,174 @@ has access to any packages except those that are present in the
 stdlib, or that are explicitly declared as build-requirements.
 
 
-Recommendations for build frontends (non-normative)
----------------------------------------------------
+Building an sdist
+-----------------
+
+Building an sdist involves three phases:
+
+1. The frontend calls the backend's ``get_requires_for_build_sdist`` hook
+   to query for any extra requirements that are needed for the sdist
+   build.
+
+2. The frontend obtains those requirements. For example, it might
+   download them from PyPI and install them into some kind of virtual
+   environment.
+
+3. The frontend calls the backend's ``build_sdist`` hook to create the
+   sdist.
+
+If either hook is missing, or returns the built-in constant
+``NotImplemented``. (Note that this is the object ``NotImplemented``,
+*not* the string ``"NotImplemented"``), then this indicates that this
+backend does not support building an sdist from this source tree. For
+example, some build backends might only support building sdists from a
+VCS checkout, and not from an unpacked sdist. If this occurs then the
+frontend should respond in whatever way it feels is appropriate. For
+example, it might display an error to the user.
+
+
+get_requires_for_build_sdist
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+::
+
+  def get_requires_for_build_sdist(config_settings):
+    ...
+
+Computes any additional requirements needed for ``build_sdist``.
+
+Returns: a list of strings containing PEP 508 dependency
+specifications, or ``NotImplemented``.
+
+Execution environment: everything specified by the
+``build-system.requires`` key in ``pyproject.toml``.
+
+Example::
+
+  def get_requires_for_build_sdist(config_settings):
+      return ["cython"]
+
+Or if there are no additional requirements beyond those specified in
+``pyproject.toml``::
+
+  def get_requires_for_build_sdist(config_settings):
+      return []
+
+
+build_sdist
+~~~~~~~~~~~
+
+::
+
+  def build_sdist(sdist_directory, config_settings):
+      ...
+
+Builds a ``.tar.gz`` source distribution and places it in the
+specified ``sdist_directory``.
+
+Returns: The basename (not the full path) of the new ``.tar.gz`` file,
+as a unicode string, or ``NotImplemented``.
+
+Execution environment: everything specified by the
+``build-system.requires`` key in ``pyproject.toml`` and by the return
+value of ``get_requires_for_build_sdist``.
+
+Notes:
+
+A .tar.gz source distribution (sdist) is named like
+``{name}-{version}.tar.gz`` (for example: ``foo-1.0.tar.gz``), and
+contains a single top-level directory called ``{name}-{version}`` (for
+example: ``foo-1.0``), which contains the source files of the
+package. This directory must also contain the ``pyproject.toml`` from
+the build directory, and a PKG-INFO file containing metadata in the
+format described in `PEP 345
+<https://www.python.org/dev/peps/pep-0345/>`_. Although historically
+zip files have also been used as sdists, this hook should produce a
+gzipped tarball. This is already the more common format for sdists,
+and having a consistent format makes for simpler tooling, so build
+backends MUST generate ``.tar.gz`` sdists.
+
+The generated tarball should use the modern POSIX.1-2001 pax tar format, which
+specifies UTF-8 based file names. This is not yet the default for the tarfile
+module shipped with Python 3.6, so backends using the tarfile module need to
+explicitly pass ``format=tarfile.PAX_FORMAT``.
+
+
+Building a wheel
+----------------
+
+The interface for building a wheel is exactly analogous to that for
+building an sdist: the same three phases, the same interpretation of
+``NotImplemented``, etc., except of course that at the end it produces
+a wheel instead of an sdist.
+
+
+get_requires_for_build_wheel
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+::
+
+  def get_requires_for_build_wheel(config_settings):
+      ...
+
+Computes any additional requirements needed for ``build_wheel``.
+
+Returns: a list of strings containing PEP 508 dependency
+specifications, or ``NotImplemented``.
+
+Execution environment: everything specified by the
+``build-system.requires`` key in ``pyproject.toml``.
+
+Example::
+
+  def get_requires_for_build_wheel(config_settings):
+      return ["wheel >= 0.25", "setuptools"]
+
+
+build_wheel
+~~~~~~~~~~~
+
+::
+
+  def build_wheel(wheel_directory, config_settings):
+      ...
+
+Builds a ``.whl`` binary distribution, and places it in the specified
+``wheel_directory``.
+
+Returns: the basename (not the full path) of the new ``.whl``, as a
+unicode string, or ``NotImplemented``.
+
+Execution environment: everything specified by the
+``build-system.requires`` key in ``pyproject.toml`` and by the return
+value of ``get_requires_for_build_wheel``.
+
+Note: If you unpack an sdist named ``{name}-{version}.tar.gz``, and
+then build a wheel from it, then the resulting wheel MUST be named
+``{name}-{version}-{compat-info}.whl``.
+
+
+Extensions
+----------
+
+Particular frontends and backends MAY coordinate to define additional
+hooks beyond those described here, but they MUST NOT claim top-level
+attributes on the build backend object to do so; these attributes are
+reserved for future PEPs. Backends MAY provide a ``extensions`` dict,
+and the semantics of the object at ``BACKEND.extensions["XX"]`` can be
+defined by the project that owns the name ``XX`` on PyPI. For example,
+the pip project could choose to define extension hooks like::
+
+  BACKEND.extensions["pip"].get_wheel_metadata
+
+or::
+
+  BACKEND.extensions["pip"]["prepare_build_files"]
+
+
+=====================================================
+ Recommendations for build frontends (non-normative)
+=====================================================
 
 A build frontend MAY use any mechanism for setting up a build
 environment that meets the above criteria. For example, simply
@@ -463,22 +561,6 @@ overrides the project's normal build-requirements.
 The general principle here is that we want to enforce hygiene on
 package *authors*, while still allowing *end-users* to open up the
 hood and apply duct tape when necessary.
-
-
-======================
- Source distributions
-======================
-
-For now, we continue with the legacy sdist format which is mostly
-undefined, but basically comes down to: a file named
-``{NAME}-{VERSION}.{EXT}``, which unpacks into a buildable source tree
-called ``{NAME}-{VERSION}/``. Traditionally these have always
-contained ``setup.py``\-style source trees; we now allow them to also
-contain ``pyproject.toml``\-style source trees.
-
-Integration frontends require that an sdist named
-``{NAME}-{VERSION}.{EXT}`` will generate a wheel named
-``{NAME}-{VERSION}-{COMPAT-INFO}.whl``.
 
 
 ===================================
@@ -586,10 +668,10 @@ build backend::
     import os.path
     import pathlib
 
-    def get_build_requires(config_settings, config_directory):
+    def get_requires_for_build_wheel(config_settings):
         return ["wheel"]
 
-    def build_wheel(wheel_directory, config_settings, config_directory=None):
+    def build_wheel(wheel_directory, config_settings):
         from wheel.archive import archive_wheelfile
         filename = "mypackage-0.1-py2.py3-none-any"
         path = os.path.join(wheel_directory, filename)
@@ -602,6 +684,9 @@ build backend::
             if not os.path.basename(archive_entry.name).startswith("."):
                 return archive_entry
         return None
+
+    def get_requires_for_build_sdist(config_settings):
+        return []
 
     def build_sdist(sdist_dir, config_settings):
         sdist_subdir = "mypackage-0.1"
@@ -658,15 +743,14 @@ across the ecosystem.
 **Third**, and most crucially, the Python hook approach gives us much
 more powerful options for evolving this specification in the future.
 
-For concreteness, imagine that next year we add a new
-``prepare_wheel_metadata2`` hook, which replaces the current
-``prepare_wheel_metadata`` hook with something that produces more data, or a
-different metadata format. In order to
-manage the transition, we want it to be possible for build frontends
-to transparently use ``prepare_wheel_metadata2`` when available and fall
-back onto ``prepare_wheel_metadata`` otherwise; and we want it to be
-possible for build backends to define both methods, for compatibility
-with both old and new build frontends.
+For concreteness, imagine that next year we add a new ``build_wheel2``
+hook, which replaces the current ``build_wheel2`` hook with something
+that adds new features (for example, the ability to build multiple
+wheels from the same source tree). In order to manage the transition,
+we want it to be possible for build frontends to transparently use
+``build_wheel2`` when available and fall back onto ``build_wheel``
+otherwise; and we want it to be possible for build backends to define
+both methods, for compatibility with both old and new build frontends.
 
 Furthermore, our mechanism should also fulfill two more goals: (a) If
 new versions of e.g. ``pip`` and ``flit`` are both updated to support
@@ -682,11 +766,11 @@ achieve. Because ``pip`` controls the code that runs inside the child
 process, it can easily write it to do something like::
 
     command, backend, args = parse_command_line_args(...)
-    if command == "prepare_wheel_metadata":
-       if hasattr(backend, "prepare_wheel_metadata2"):
-           backend.prepare_wheel_metadata2(...)
-       elif hasattr(backend, "prepare_wheel_metadata"):
-           backend.prepare_wheel_metadata(...)
+    if command == "build_wheel":
+       if hasattr(backend, "build_wheel2"):
+           backend.build_wheel2(...)
+       elif hasattr(backend, "build_wheel"):
+           backend.build_wheel(...)
        else:
            # error handling
 
@@ -699,58 +783,6 @@ of that PEP), meaning that any changes in the interface will require
 N individual packages to update their ``pyproject.toml`` files before
 any change can go live, and that any changes will necessarily be
 restricted to new releases.
-
-One specific consequence of this is that in this PEP, we're able to
-make the ``prepare_wheel_metadata`` command optional. In our design, this
-can easily be worked around by a tool like ``pip``, which can put code
-in its subprocess runner like::
-
-    def prepare_wheel_metadata(output_dir, config_settings):
-         if hasattr(backend, "prepare_wheel_metadata"):
-             backend.prepare_wheel_metadata(output_dir, config_settings)
-         else:
-             backend.build_wheel(output_dir, config_settings)
-             touch(output_dir / "PIP_ALREADY_BUILT_WHEELS")
-             unzip_metadata(output_dir/*.whl)
-
-    def build_wheel(output_dir, config_settings, metadata_dir):
-         if os.path.exists(metadata_dir.parent / "PIP_ALREADY_BUILT_WHEELS"):
-             copy(metadata_dir.parent / *.whl, output_dir)
-         else:
-             backend.build_wheel(output_dir, config_settings, metadata_dir)
-
-and thus expose a totally uniform interface to the rest of ``pip``,
-with no extra subprocess calls, no duplicated builds, etc. But
-obviously this is the kind of code that you only want to write as part
-of a private, within-project interface.
-
-(And, of course, making the ``metadata`` command optional is one piece
-of lowering the barrier to entry, as discussed above.)
-
-
-Other differences
-=================
-
-Besides the key command line versus Python hook difference described
-above, there are a few other differences in this proposal:
-
-* Metadata command is optional (as described above).
-
-* We return metadata as a directory, rather than a single METADATA
-  file. This aligns better with the way that in practice wheel metadata
-  is distributed across multiple files (e.g. entry points), and gives us
-  more options in the future. (For example, instead of following the PEP
-  426 proposal of switching the format of METADATA to JSON, we might
-  decide to keep the existing METADATA the way it is for backcompat,
-  while adding new extensions as JSON "sidecar" files inside the same
-  directory. Or maybe not; the point is it keeps our options more open.)
-
-* We provide a mechanism for passing information between the metadata
-  step and the wheel building step. I guess everyone probably will
-  agree this is a good idea?
-
-* We provide more detailed recommendations about the build environment,
-  but these aren't normative anyway.
 
 
 ====================
@@ -796,18 +828,139 @@ automatically upgrade packages to the new format:
    will need to stop doing that.
 
 
-==================
- Rejected options
-==================
+================================
+ Rejected and deferred features
+================================
 
-* We discussed making the wheel and sdist hooks build unpacked directories
-  containing the same contents as their respective archives. In some cases this
-  could avoid the need to pack and unpack an archive, but this seems like
-  premature optimisation. It's advantageous for tools to work with archives
-  as the canonical interchange formats (especially for wheels, where the archive
-  format is already standardised). Close control of archive creation is
-  important for reproducible builds. And it's not clear that tasks requiring an
-  unpacked distribution will be more common than those requiring an archive.
+A number of potential extra features were discussed beyond the
+above. For the most part the decision was made that it was better to
+defer trying to implement these until we had more experience with the
+basic interface, and to provide a minimal extension interface (the
+``extensions`` dictionary) that will allow us to prototype these
+features before standardizing them. Specifically:
+
+* Editable installs: This PEP originally specified another hook,
+  ``install_editable``, to do an editable install (as with ``pip
+  install -e``). It was removed due to the complexity of the topic,
+  but may be specified in a later PEP.
+
+  Briefly, the questions to be answered include: what reasonable ways existing
+  of implementing an 'editable install'? Should the backend or the frontend
+  pick how to make an editable install? And if the frontend does, what does it
+  need from the backend to do so.
+
+* Getting wheel metadata from a source tree without building a wheel:
+  it's believed that when pip adds a backtracking constraint solver
+  for package dependencies, it may be useful to add a hook to query a
+  source tree to get metadata about the wheel that it *would*
+  generate, if it were asked to build a wheel. Specifically, the kind of
+  situation where it's anticipated that this might come up is:
+
+  1. Package A depends on B and C==1.0
+  2. B is only available as an sdist
+  3. We fetch the sdist for the latest version of B, build it into a
+     wheel, and then discover that it depends on C==1.5, which means
+     that it isn't compatible with this version of A.
+  4. We fetch the sdist for the latest-but-one version of B, build it
+     into a wheel, and then discover that it depends on C==1.4, which
+     means that it isn't compatible with this version of A.
+  5. We fetch the sdist for the latest-but-two version of B...
+
+  The idea would be that we could reduce (but not eliminate) the cost
+  of steps 3, 4, 5, ... if there were a way to query a build backend
+  to find out the requirements without actually building a wheel,
+  which is a potentially expensive operation.
+
+  Of course, these repeated fetches are expensive no matter what we
+  do, so the ideal solution would be to provide wheels for B, so that
+  none of this needs to be done at all. And for many packages (for
+  example, pure Python packages), building a wheel is nearly as cheap
+  as fetching the metadata. And building a wheel also has the
+  advantage of giving us something we can store in the wheel cache for
+  next time. But perhaps this is still a good idea for packages that
+  are particularly slow to build (for example, complex packages like
+  scipy or qt).
+
+  It was eventually decided to defer this for now, since it adds
+  non-trivial complexity for build backends (the metadata fetching
+  phase and the wheel building phase run at different times, yet have
+  to produce consistent results), and until pip's backtracking
+  resolver is actually implemented, we're only guessing at the value
+  of this optimization and the exact semantics it will require.
+
+* A specialized hook for copying a source tree into a new source tree:
+  in certain cases, like when installing directly from a local VCS
+  checkout, pip prefers to copy the source tree to a temporary
+  directory before building it. This provides some protection against
+  build systems that can give incorrect results when repeatedly
+  building in the same tree. Historically, pip has accomplished this
+  copy using a simple ``shutil.copytree``, but this causes various
+  problems, like copying large git checkouts or intermediate artifacts
+  from previous in-place builds. In the future, therefore, pip might
+  move to a multi-step process like:
+
+  1. Create an sdist from the VCS checkout
+  2. Unpack this sdist into a temporary directory.
+  3. Build a wheel from the unpacked sdist.
+  4. Install the wheel.
+
+  Even better, this provides some guarantee that going from VCS
+  checkout → sdist → wheel will produce identical results to going
+  directly from VCS checkout → wheel.
+
+  However, this runs into a potential problem: what if this particular
+  combination of source tree + build backend can't actually build an
+  sdist? (For example, `flit <http://flit.readthedocs.org/>`__ may
+  have this limitation for certain trees unpacked from sdists.)
+  Therefore, we considered adding an optional hook like
+  ``prepare_temporary_tree_for_build_wheel`` that would copy the
+  required source files into a specified temporary directory.
+
+  But:
+
+  * Such a hook would add non-trivial complexity to this spec: it
+    requires us to promote the idea of an "out of tree build" to a
+    first class concept, and specify which kinds of trees are required
+    to support which operations, etc.
+  * A major motivation for doing the build-sdist-unpack-sdist dance in the
+    first place is that we don't trust the backend code to produce the
+    same result when building from a VCS checkout as when building
+    from an sdist, but if we don't trust the backend then it seems odd
+    to add a special hook that puts the backend in charge of doing the
+    dance.
+  * If sdist creation is unsupported, then pip can fall back on a
+    ``shutil.copytree`` strategy in just a few lines of code
+  * And in fact, for the one known case where this might be a problem
+    (unpacked sdist using flit), ``shutil.copytree`` is essentially
+    optimal
+  * Though in fact for flit, this is still a pointless expense – doing
+    an in-place build is perfectly safe and even more efficient.
+  * Plus projects using flit always have wheels, so this will
+    essentially never even come up in the first place
+  * And pip hasn't even implemented the sdist optimization for legacy
+    ``setup.py``\-based projects yet, so we have no operational
+    experience to refer to and it might turn out there are some
+    unknown-unknowns that we'll want to take into account before
+    standardizing an optimization for it here.
+
+  And since this would be an optional hook anyway, it's just as easy
+  to add later once the exact parameters are better understood.
+
+* There was some discussion of extending these hooks to allow a single
+  source tree to produce multiple wheels. But this is a complex enough
+  topic that it clearly requires its own PEP.
+
+* We also discussed making the wheel and sdist hooks build unpacked
+  directories containing the same contents as their respective
+  archives. In some cases this could avoid the need to pack and unpack
+  an archive, but this seems like premature optimisation. It's
+  advantageous for tools to work with archives as the canonical
+  interchange formats (especially for wheels, where the archive format
+  is already standardised). Close control of archive creation is
+  important for reproducible builds. And it's not clear that tasks
+  requiring an unpacked distribution will be more common than those
+  requiring an archive.
+
 
 ===========
  Copyright
