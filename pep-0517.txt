@@ -405,7 +405,8 @@ build_sdist
       ...
 
 Builds a ``.tar.gz`` source distribution and places it in the
-specified ``sdist_directory``.
+specified ``sdist_directory``. ``sdist_directory`` MUST be an absolute
+path.
 
 Returns: The basename (not the full path) of the new ``.tar.gz`` file,
 as a unicode string, or ``NotImplemented``.
@@ -475,7 +476,7 @@ build_wheel
       ...
 
 Builds a ``.whl`` binary distribution, and places it in the specified
-``wheel_directory``.
+``wheel_directory``. ``wheel_directory`` MUST be an absolute path.
 
 Returns: the basename (not the full path) of the new ``.whl``, as a
 unicode string, or ``NotImplemented``.
