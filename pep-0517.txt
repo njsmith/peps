@@ -1,5 +1,5 @@
 PEP: 517
-Title: Supporting non-setup.py-based build backends in pyproject.toml
+Title: A build-system independent format for source trees
 Version: $Revision$
 Last-Modified: $Date$
 Author: Nathaniel J. Smith <njs@pobox.com>,
