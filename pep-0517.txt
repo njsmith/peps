@@ -963,6 +963,40 @@ features before standardizing them. Specifically:
   requiring an archive.
 
 
+=======
+ Todo:
+=======
+
+- Is the use of ``unicode`` for paths on Python 2 going to cause
+  horrible brokenness for people on Unix with non-UTF8 locales? AFAIK
+  py2 doesn't have surrogate-escape :-(. What if the absolute path to
+  the source tree cannot be represented as ``unicode``, for example
+  because it starts ``/home/<some KOI-8>/...``?
+
+- The process working dir is the source tree. Does this mean that it
+  is automatically on sys.path, or not? We should pick one. Probably
+  it should not be, and neither should random other directories, so
+  frontends should do something like ``sys.path.pop(0)`` before
+  calling any hooks.
+
+- Should there be some way to import a backend from the source tree?
+  Perhaps a pyproject.toml key that names a source-tree relative
+  directory that should be absolutified and then added to sys.path?
+
+  If we do this we should probably recommend frontends set
+  PYTHONDONTWRITEBYTECODE=1
+
+- Finish the discussion about re-using the same process to call
+  multiple hooks.
+
+- Either copy in the rationale for NotImplemented from `here
+  <https://mail.python.org/pipermail/distutils-sig/2017-July/030901.html>`__,
+  or replace with NotImplementedError if we go that way.
+
+- Add some discussion of in-place/out-of-place – to the "deferred for
+  future PEP" section if nothing else.
+
+
 ===========
  Copyright
 ===========
