@@ -496,7 +496,7 @@ Extensions
 Particular frontends and backends MAY coordinate to define additional
 hooks beyond those described here, but they MUST NOT claim top-level
 attributes on the build backend object to do so; these attributes are
-reserved for future PEPs. Backends MAY provide a ``extensions`` dict,
+reserved for future PEPs. Backends MAY provide an ``extensions`` dict,
 and the semantics of the object at ``BACKEND.extensions["XX"]`` can be
 defined by the project that owns the name ``XX`` on PyPI. For example,
 the pip project could choose to define extension hooks like::
