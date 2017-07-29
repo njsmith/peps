@@ -996,6 +996,12 @@ features before standardizing them. Specifically:
 - Add some discussion of in-place/out-of-place – to the "deferred for
   future PEP" section if nothing else.
 
+- Should we make optional arguments kwarg-only, and mandate that
+  positional arguments are always positional? This is probably more
+  backwards-compatible going forward, e.g. if two PEPs each add an
+  optional kwarg then we don't have to specify what order they're
+  listed in.
+
 
 ===========
  Copyright
