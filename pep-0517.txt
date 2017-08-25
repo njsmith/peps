@@ -1002,6 +1002,13 @@ features before standardizing them. Specifically:
   optional kwarg then we don't have to specify what order they're
   listed in.
 
+- some way for frontend to request name/version/bug-reporting-url for
+  a backend? (as suggested by xoviat)
+
+- "I can see an argument for adding language saying that build_sdist
+  SHOULD avoid modifying the source tree if possible, and MAY write
+  scratch files to the sdist_directory."
+
 
 ===========
  Copyright
